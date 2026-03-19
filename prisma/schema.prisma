@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                     String    @id @default(cuid())
+  name                   String?
+  email                  String    @unique
+  emailVerified          DateTime?
+  image                  String?
+  passwordHash           String?
+  timezone               String    @default("UTC")
+  primaryCurrency        String    @default("USD")
+  preferredReminderTime  String    @default("09:00")
+  notificationsEnabled   Boolean   @default(true)
+  onboardingCompletedAt  DateTime?
+  activeContextType      String    @default("personal")
+  activeContextId        String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  accounts               Account[]
+  sessions               Session[]
+  sharedMemberships      SharedAccountMember[]
+}
+
+model SharedAccount {
+  id              String               @id @default(cuid())
+  name            String
+  createdByUserId String
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  members         SharedAccountMember[]
+}
+
+model SharedAccountMember {
+  id              String       @id @default(cuid())
+  sharedAccountId String
+  userId          String
+  joinedAt        DateTime     @default(now())
+
+  sharedAccount   SharedAccount @relation(fields: [sharedAccountId], references: [id], onDelete: Cascade)
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sharedAccountId, userId])
+}
+
+model Payment {
+  id                  String   @id @default(cuid())
+  ownerType           String
+  ownerId             String
+  title               String
+  paymentType         String
+  amountMinor         Int
+  currency            String
+  nextDueDate         DateTime
+  recurrenceInterval  Int
+  recurrenceUnit      String
+  categoryId          String?
+  note                String?
+  status              String
+  createdByUserId     String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  category            Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  reminders           PaymentReminder[]
+  history             PaymentHistory[]
+
+  @@index([ownerType, ownerId, status])
+  @@index([nextDueDate])
+}
+
+model PaymentReminder {
+  id         String   @id @default(cuid())
+  paymentId  String
+  offsetDays Int
+  createdAt  DateTime @default(now())
+
+  payment    Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+}
+
+model PaymentHistory {
+  id              String   @id @default(cuid())
+  paymentId       String
+  paidAt          DateTime
+  paidAmountMinor Int
+  currency        String
+  createdByUserId String
+  scheduleAction  String
+  note            String?
+  createdAt       DateTime @default(now())
+
+  payment         Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId, paidAt(sort: Desc)])
+}
+
+model FxRate {
+  id            String   @id @default(cuid())
+  baseCurrency  String
+  quoteCurrency String
+  rate          Decimal  @db.Decimal(20, 10)
+  fetchedAt     DateTime
+
+  @@unique([baseCurrency, quoteCurrency])
+}
+
+model NotificationLog {
+  id                 String   @id @default(cuid())
+  paymentId          String
+  userId             String
+  channel            String
+  reminderOffsetDays Int
+  targetDueDate      DateTime
+  status             String
+  attemptCount       Int      @default(0)
+  lastAttemptAt      DateTime?
+  sentAt             DateTime?
+  errorMessage       String?
+  createdAt          DateTime @default(now())
+
+  @@index([userId, paymentId, targetDueDate, reminderOffsetDays])
+}
+
+// Auth.js models
+model Account {
+  userId             String
+  type               String
+  provider           String
+  providerAccountId  String
+  refresh_token      String?
+  access_token       String?
+  expires_at         Int?
+  token_type         String?
+  scope              String?
+  id_token           String?
+  session_state      String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([sessionToken])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+model Category {
+  id              String   @id @default(cuid())
+  ownerType       String
+  ownerId         String
+  name            String
+  color           String   @default("#1f4ec9")
+  isArchived      Boolean  @default(false)
+  createdByUserId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  payments        Payment[]
+
+  @@unique([ownerType, ownerId, name])
+  @@index([ownerType, ownerId, isArchived])
+}
+
+
+
