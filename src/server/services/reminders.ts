@@ -7,6 +7,10 @@ type ReminderRunResult = {
   paymentsConsidered: number;
   logsCreated: number;
   logsSkippedExisting: number;
+  pushAttempted: number;
+  pushSent: number;
+  pushFailed: number;
+  pushSkipped: number;
 };
 
 type UserWithMemberships = {
@@ -30,7 +34,12 @@ const DEFAULT_OFFSET_DAYS = 1;
 const FALLBACK_TIMEZONE = "UTC";
 
 type ReminderChannel = "in_app" | "push";
-type ReminderStatus = "queued" | "sent" | "read" | "skipped" | "failed";
+type ReminderStatus = "pending" | "sent" | "read" | "skipped" | "failed";
+
+type PushAttemptResult = "sent" | "failed";
+
+const MAX_PUSH_ATTEMPTS = 3;
+const PUSH_RETRY_BACKOFF_MINUTES = [0, 5, 30];
 
 export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunResult> {
   const users = (await prisma.user.findMany({
@@ -50,6 +59,10 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
   let paymentsConsidered = 0;
   let logsCreated = 0;
   let logsSkippedExisting = 0;
+  let pushAttempted = 0;
+  let pushSent = 0;
+  let pushFailed = 0;
+  let pushSkipped = 0;
 
   for (const user of users) {
     const payments = await listAccessiblePayments(user.id, user.sharedMemberships.map((m) => m.sharedAccountId));
@@ -89,7 +102,7 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
           targetDueDate: payment.nextDueDate,
           reminderOffsetDays: offsetDays,
           channel: "push",
-          status: user.notificationsEnabled ? "queued" : "skipped",
+          status: user.notificationsEnabled ? "pending" : "skipped",
           sentAt: user.notificationsEnabled ? null : runAt,
           errorMessage: user.notificationsEnabled ? null : "notifications_disabled",
         });
@@ -103,12 +116,95 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
     }
   }
 
+  const pushLogs = await prisma.notificationLog.findMany({
+    where: {
+      channel: "push",
+      OR: [
+        { status: "pending" },
+        { status: "failed" },
+        { status: "queued" },
+      ],
+    },
+    select: {
+      id: true,
+      userId: true,
+      attemptCount: true,
+      lastAttemptAt: true,
+      status: true,
+    },
+  });
+
+  const usersById = new Map(users.map((user) => [user.id, user]));
+
+  for (const log of pushLogs) {
+    const user = usersById.get(log.userId);
+    if (!user) {
+      continue;
+    }
+
+    if (!shouldAttemptPushRetry(runAt, log.attemptCount, log.lastAttemptAt)) {
+      continue;
+    }
+
+    if (log.attemptCount >= MAX_PUSH_ATTEMPTS) {
+      await prisma.notificationLog.update({
+        where: { id: log.id },
+        data: {
+          status: "skipped",
+          errorMessage: "retry_limit_reached",
+          lastAttemptAt: runAt,
+        },
+      });
+      pushSkipped += 1;
+      continue;
+    }
+
+    pushAttempted += 1;
+    const nextAttemptCount = log.attemptCount + 1;
+    const delivery = await attemptPushDelivery();
+
+    if (delivery === "sent") {
+      await prisma.notificationLog.update({
+        where: { id: log.id },
+        data: {
+          status: "sent",
+          sentAt: runAt,
+          lastAttemptAt: runAt,
+          attemptCount: nextAttemptCount,
+          errorMessage: null,
+        },
+      });
+      pushSent += 1;
+      continue;
+    }
+
+    const terminal = nextAttemptCount >= MAX_PUSH_ATTEMPTS;
+    await prisma.notificationLog.update({
+      where: { id: log.id },
+      data: {
+        status: terminal ? "skipped" : "failed",
+        lastAttemptAt: runAt,
+        attemptCount: nextAttemptCount,
+        errorMessage: terminal ? "retry_limit_reached" : "push_delivery_failed",
+      },
+    });
+    if (terminal) {
+      pushSkipped += 1;
+    } else {
+      pushFailed += 1;
+    }
+  }
+
   return {
     runAt: runAt.toISOString(),
     usersProcessed: users.length,
     paymentsConsidered,
     logsCreated,
     logsSkippedExisting,
+    pushAttempted,
+    pushSent,
+    pushFailed,
+    pushSkipped,
   };
 }
 
@@ -398,6 +494,8 @@ async function createNotificationLogIfMissing(input: {
     return false;
   }
 
+  const initialAttemptCount = input.channel === "push" && input.status === "pending" ? 0 : 0;
+
   await prisma.notificationLog.create({
     data: {
       userId: input.userId,
@@ -409,10 +507,31 @@ async function createNotificationLogIfMissing(input: {
       sentAt: input.sentAt,
       lastAttemptAt: input.sentAt,
       errorMessage: input.errorMessage ?? null,
-      attemptCount: input.status === "queued" ? 1 : 0,
+      attemptCount: initialAttemptCount,
     },
   });
 
   return true;
 }
 
+async function attemptPushDelivery(): Promise<PushAttemptResult> {
+  return "failed";
+}
+
+export function shouldAttemptPushRetry(
+  runAt: Date,
+  attemptCount: number,
+  lastAttemptAt: Date | null,
+): boolean {
+  if (attemptCount >= MAX_PUSH_ATTEMPTS) {
+    return false;
+  }
+
+  const delayMinutes = PUSH_RETRY_BACKOFF_MINUTES[Math.max(0, attemptCount)] ?? 60;
+  if (!lastAttemptAt) {
+    return true;
+  }
+
+  const nextAttemptAt = lastAttemptAt.getTime() + delayMinutes * 60 * 1000;
+  return runAt.getTime() >= nextAttemptAt;
+}

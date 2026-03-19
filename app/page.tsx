@@ -60,8 +60,8 @@ export default async function DashboardPage({
         </div>
 
         <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2">
-          {statCard("Due this month", formatAmount(data.dueThisMonthMinor, "USD"), "brand")}
-          {statCard("Monthly load", formatAmount(data.monthlyLoadMinor, "USD"), "success")}
+          {statCard("Due this month", formatAmount(data.dueThisMonthMinor, data.displayCurrency), "brand")}
+          {statCard("Monthly load", formatAmount(data.monthlyLoadMinor, data.displayCurrency), "success")}
         </div>
       </div>
 
@@ -142,4 +142,3 @@ export default async function DashboardPage({
     </section>
   );
 }
-

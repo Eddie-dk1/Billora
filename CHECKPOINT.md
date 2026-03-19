@@ -8,6 +8,7 @@
   - reminders center;
   - settings + categories;
   - analytics completion (yearly total + most expensive payments);
+  - FX conversion in dashboard/analytics totals (user primary currency + FxRate fallback path);
   - jobs endpoints.
 - Completed foundation:
   - credentials auth + session user id;
@@ -15,6 +16,9 @@
   - ownership/membership checks;
   - shared account create/join/list;
   - onboarding enforcement.
+- Notifications groundwork updated:
+  - push lifecycle statuses aligned to `pending/sent/failed/skipped`;
+  - retry policy with backoff + max attempts wired into reminders job.
 - UX polish complete:
   - sign-out flow + callback redirect reasons;
   - invite/share UX;
@@ -26,7 +30,7 @@
   - `npm run test`
 
 ## Where We Stopped
-- We stopped after **Analytics completion** and infra recovery.
+- We stopped after **FX completion** and infra recovery.
 - Environment was validated as healthy before shutdown:
   - Docker Engine running;
   - DB container healthy on `5432`;
@@ -34,33 +38,29 @@
 - Current requested state: all local runtime processes stopped.
 
 ## Remaining Work (Priority Order)
-1. FX completion:
-   - real conversion via `FxRate` in dashboard/analytics totals;
-   - fallback to last known rates.
-2. Notifications completion:
-   - real web push;
-   - lifecycle statuses (`pending/sent/failed/skipped`);
-   - retry policy.
-3. Scheduler integration:
+1. Notifications completion:
+   - real web push transport + per-user subscription storage;
+   - delivery success path from `pending` to `sent` (currently retry/fail/skip path is in place).
+2. Scheduler integration:
    - cron/QStash integration for `jobs/fx` and `jobs/reminders`.
-4. Overdue lifecycle:
+3. Overdue lifecycle:
    - daily overdue check;
    - follow-up reminders;
    - overdue UX.
-5. i18n prep:
+4. i18n prep:
    - extract text layer;
    - localization-ready structure.
-6. Testing expansion:
+5. Testing expansion:
    - shared/security/api/reminders/fx/analytics coverage.
-7. Production readiness:
+6. Production readiness:
    - final `.env`;
    - staging/prod migrations + seed;
    - monitoring/logging;
    - CI on PRs.
-8. Final acceptance:
+7. Final acceptance:
    - spec checklist;
    - manual QA journeys;
    - UI polish.
 
 ## Next Step
-- Implement **FX completion**.
+- Implement **Notifications completion**.

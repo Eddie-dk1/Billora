@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import type { AccessScope } from "@/server/context";
 import { categoryExistsInScope } from "@/server/services/categories";
+import { buildFxRateLookup, convertAmountMinor } from "@/server/services/fx-conversion";
 import { calculateNextDueDateOnMarkPaid } from "@/server/services/recurrence";
 import type { EarlyPaymentDecision, RecurrenceRule, RecurrenceUnit } from "@/types/recurrence";
 
@@ -80,6 +81,7 @@ export type MarkPaidInput = {
 
 const REMINDER_OFFSET_OPTIONS = new Set([0, 1, 3, 7]);
 const DEFAULT_REMINDER_OFFSETS = [1];
+const DEFAULT_DISPLAY_CURRENCY = "USD";
 
 export function parseIsoDateOnly(value: string): Date {
   const parsed = new Date(`${value}T00:00:00.000Z`);
@@ -308,6 +310,7 @@ export async function markPaymentPaid(scope: AccessScope, paymentId: string, inp
 }
 
 export async function getDashboardData(scope: AccessScope): Promise<{
+  displayCurrency: string;
   dueThisMonthMinor: number;
   monthlyLoadMinor: number;
   upcoming: PaymentRecord[];
@@ -316,8 +319,9 @@ export async function getDashboardData(scope: AccessScope): Promise<{
   const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const monthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1));
 
-  const [dueThisMonth, activePayments, upcoming] = await Promise.all([
-    prisma.payment.aggregate({
+  const [displayCurrency, dueThisMonthPayments, activePayments, upcoming] = await Promise.all([
+    getUserDisplayCurrency(scope.userId),
+    prisma.payment.findMany({
       where: {
         ownerType: scope.ownerType,
         ownerId: scope.ownerId,
@@ -327,7 +331,10 @@ export async function getDashboardData(scope: AccessScope): Promise<{
           lt: monthEnd,
         },
       },
-      _sum: { amountMinor: true },
+      select: {
+        amountMinor: true,
+        currency: true,
+      },
     }),
     prisma.payment.findMany({
       where: {
@@ -361,7 +368,17 @@ export async function getDashboardData(scope: AccessScope): Promise<{
     }),
   ]);
 
+  const fxLookup = await loadFxRateLookup(
+    collectCurrenciesFromPayments(activePayments, displayCurrency),
+  );
+
   const activePaymentsTyped = activePayments as PaymentRecord[];
+
+  const dueThisMonthMinor = dueThisMonthPayments.reduce(
+    (sum, payment) =>
+      sum + convertAmountMinor(payment.amountMinor, payment.currency, displayCurrency, fxLookup),
+    0,
+  );
 
   const monthlyLoadMinor = Math.round(
     activePaymentsTyped.reduce((sum, payment) => {
@@ -369,12 +386,14 @@ export async function getDashboardData(scope: AccessScope): Promise<{
         payment.recurrenceInterval,
         payment.recurrenceUnit as RecurrenceUnit,
       );
-      return sum + payment.amountMinor * monthlyMultiplier;
+      const convertedMinor = convertAmountMinor(payment.amountMinor, payment.currency, displayCurrency, fxLookup);
+      return sum + convertedMinor * monthlyMultiplier;
     }, 0),
   );
 
   return {
-    dueThisMonthMinor: dueThisMonth._sum.amountMinor ?? 0,
+    displayCurrency,
+    dueThisMonthMinor,
     monthlyLoadMinor,
     upcoming: upcoming as PaymentRecord[],
   };
@@ -406,6 +425,7 @@ export async function getCalendarData(scope: AccessScope, year: number, month: n
 }
 
 export async function getAnalyticsData(scope: AccessScope): Promise<{
+  displayCurrency: string;
   totalCount: number;
   totalAmountMinor: number;
   next30Count: number;
@@ -429,62 +449,8 @@ export async function getAnalyticsData(scope: AccessScope): Promise<{
   const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
   const nextYearStart = new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1));
 
-  const [total, next30, yearTotal, groupedByType, groupedByCategory, mostExpensive] = await Promise.all([
-    prisma.payment.aggregate({
-      where: {
-        ownerType: scope.ownerType,
-        ownerId: scope.ownerId,
-        status: "active",
-      },
-      _sum: { amountMinor: true },
-      _count: { _all: true },
-    }),
-    prisma.payment.aggregate({
-      where: {
-        ownerType: scope.ownerType,
-        ownerId: scope.ownerId,
-        status: "active",
-        nextDueDate: {
-          gte: todayStart,
-          lte: plus30,
-        },
-      },
-      _sum: { amountMinor: true },
-      _count: { _all: true },
-    }),
-    prisma.payment.aggregate({
-      where: {
-        ownerType: scope.ownerType,
-        ownerId: scope.ownerId,
-        status: "active",
-        nextDueDate: {
-          gte: yearStart,
-          lt: nextYearStart,
-        },
-      },
-      _sum: { amountMinor: true },
-      _count: { _all: true },
-    }),
-    prisma.payment.groupBy({
-      by: ["paymentType"],
-      where: {
-        ownerType: scope.ownerType,
-        ownerId: scope.ownerId,
-        status: "active",
-      },
-      _sum: { amountMinor: true },
-      _count: { _all: true },
-    }),
-    prisma.payment.groupBy({
-      by: ["categoryId"],
-      where: {
-        ownerType: scope.ownerType,
-        ownerId: scope.ownerId,
-        status: "active",
-      },
-      _sum: { amountMinor: true },
-      _count: { _all: true },
-    }),
+  const [displayCurrency, payments] = await Promise.all([
+    getUserDisplayCurrency(scope.userId),
     prisma.payment.findMany({
       where: {
         ownerType: scope.ownerType,
@@ -498,14 +464,58 @@ export async function getAnalyticsData(scope: AccessScope): Promise<{
         amountMinor: true,
         currency: true,
         nextDueDate: true,
+        categoryId: true,
       },
-      orderBy: [{ amountMinor: "desc" }, { nextDueDate: "asc" }],
-      take: 5,
     }),
   ]);
 
-  const categoryIds = groupedByCategory
-    .map((item) => item.categoryId)
+  const fxLookup = await loadFxRateLookup(
+    collectCurrenciesFromPayments(payments, displayCurrency),
+  );
+
+  const withConvertedAmount = payments.map((payment) => ({
+    ...payment,
+    convertedMinor: convertAmountMinor(payment.amountMinor, payment.currency, displayCurrency, fxLookup),
+  }));
+
+  const next30Payments = withConvertedAmount.filter(
+    (payment) => payment.nextDueDate >= todayStart && payment.nextDueDate <= plus30,
+  );
+  const yearPayments = withConvertedAmount.filter(
+    (payment) => payment.nextDueDate >= yearStart && payment.nextDueDate < nextYearStart,
+  );
+
+  const groupedByTypeMap = new Map<string, { count: number; amountMinor: number }>();
+  for (const payment of withConvertedAmount) {
+    const existing = groupedByTypeMap.get(payment.paymentType);
+    if (existing) {
+      existing.count += 1;
+      existing.amountMinor += payment.convertedMinor;
+      continue;
+    }
+
+    groupedByTypeMap.set(payment.paymentType, {
+      count: 1,
+      amountMinor: payment.convertedMinor,
+    });
+  }
+
+  const groupedByCategoryMap = new Map<string | null, { count: number; amountMinor: number }>();
+  for (const payment of withConvertedAmount) {
+    const existing = groupedByCategoryMap.get(payment.categoryId);
+    if (existing) {
+      existing.count += 1;
+      existing.amountMinor += payment.convertedMinor;
+      continue;
+    }
+
+    groupedByCategoryMap.set(payment.categoryId, {
+      count: 1,
+      amountMinor: payment.convertedMinor,
+    });
+  }
+
+  const categoryIds = Array.from(groupedByCategoryMap.keys())
     .filter((item): item is string => Boolean(item));
 
   const categories =
@@ -526,33 +536,37 @@ export async function getAnalyticsData(scope: AccessScope): Promise<{
   const categoryNameMap = new Map(categories.map((item) => [item.id, item.name]));
 
   return {
-    totalCount: total._count._all,
-    totalAmountMinor: total._sum.amountMinor ?? 0,
-    next30Count: next30._count._all,
-    next30AmountMinor: next30._sum.amountMinor ?? 0,
-    yearCount: yearTotal._count._all,
-    yearAmountMinor: yearTotal._sum.amountMinor ?? 0,
-    byType: groupedByType.map((item) => ({
-      paymentType: item.paymentType,
-      count: item._count._all,
-      amountMinor: item._sum.amountMinor ?? 0,
+    displayCurrency,
+    totalCount: withConvertedAmount.length,
+    totalAmountMinor: withConvertedAmount.reduce((sum, item) => sum + item.convertedMinor, 0),
+    next30Count: next30Payments.length,
+    next30AmountMinor: next30Payments.reduce((sum, item) => sum + item.convertedMinor, 0),
+    yearCount: yearPayments.length,
+    yearAmountMinor: yearPayments.reduce((sum, item) => sum + item.convertedMinor, 0),
+    byType: Array.from(groupedByTypeMap.entries()).map(([paymentType, value]) => ({
+      paymentType,
+      count: value.count,
+      amountMinor: value.amountMinor,
     })),
-    byCategory: groupedByCategory
-      .map((item) => ({
-        categoryId: item.categoryId,
-        categoryName: item.categoryId ? categoryNameMap.get(item.categoryId) ?? "Unknown" : "Uncategorized",
-        count: item._count._all,
-        amountMinor: item._sum.amountMinor ?? 0,
+    byCategory: Array.from(groupedByCategoryMap.entries())
+      .map(([categoryId, value]) => ({
+        categoryId,
+        categoryName: categoryId ? categoryNameMap.get(categoryId) ?? "Unknown" : "Uncategorized",
+        count: value.count,
+        amountMinor: value.amountMinor,
       }))
       .sort((a, b) => b.amountMinor - a.amountMinor),
-    mostExpensive: mostExpensive.map((item) => ({
+    mostExpensive: withConvertedAmount
+      .sort((a, b) => b.convertedMinor - a.convertedMinor || a.nextDueDate.getTime() - b.nextDueDate.getTime())
+      .slice(0, 5)
+      .map((item) => ({
       id: item.id,
       title: item.title,
       paymentType: item.paymentType,
       amountMinor: item.amountMinor,
       currency: item.currency,
       nextDueDate: item.nextDueDate,
-    })),
+      })),
   };
 }
 
@@ -604,4 +618,69 @@ async function resolveCategoryIdForWrite(scope: AccessScope, categoryId?: string
   }
 
   return normalized;
+}
+
+type AmountWithCurrency = {
+  amountMinor: number;
+  currency: string;
+};
+
+function collectCurrenciesFromPayments(
+  payments: AmountWithCurrency[],
+  displayCurrency: string,
+): string[] {
+  const currencies = new Set<string>([displayCurrency.toUpperCase(), DEFAULT_DISPLAY_CURRENCY]);
+  for (const payment of payments) {
+    currencies.add(payment.currency.toUpperCase());
+  }
+
+  return Array.from(currencies);
+}
+
+async function loadFxRateLookup(currencies: string[]): Promise<Map<string, number>> {
+  const normalized = Array.from(new Set(currencies.map((item) => item.trim().toUpperCase()).filter(Boolean)));
+  if (normalized.length <= 1) {
+    return new Map<string, number>();
+  }
+
+  const rates = await prisma.fxRate.findMany({
+    where: {
+      OR: [
+        {
+          baseCurrency: { in: normalized },
+          quoteCurrency: { in: normalized },
+        },
+        {
+          baseCurrency: DEFAULT_DISPLAY_CURRENCY,
+          quoteCurrency: { in: normalized },
+        },
+        {
+          baseCurrency: { in: normalized },
+          quoteCurrency: DEFAULT_DISPLAY_CURRENCY,
+        },
+      ],
+    },
+    select: {
+      baseCurrency: true,
+      quoteCurrency: true,
+      rate: true,
+    },
+  });
+
+  return buildFxRateLookup(
+    rates.map((item) => ({
+      baseCurrency: item.baseCurrency,
+      quoteCurrency: item.quoteCurrency,
+      rate: Number(item.rate),
+    })),
+  );
+}
+
+async function getUserDisplayCurrency(userId: string): Promise<string> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { primaryCurrency: true },
+  });
+
+  return user?.primaryCurrency?.toUpperCase() ?? DEFAULT_DISPLAY_CURRENCY;
 }

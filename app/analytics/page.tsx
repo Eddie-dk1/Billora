@@ -43,19 +43,19 @@ export default async function AnalyticsPage({
           <div className="rounded-2xl bg-[linear-gradient(135deg,#1f4ec9_0%,#2a66e7_100%)] p-4 text-white shadow-lg">
             <div className="text-xs uppercase tracking-[0.12em] text-white/80">Active payments</div>
             <div className="mt-2 text-2xl font-bold">{analytics.totalCount}</div>
-            <div className="text-sm text-white/85">{formatAmount(analytics.totalAmountMinor, "USD")}</div>
+            <div className="text-sm text-white/85">{formatAmount(analytics.totalAmountMinor, analytics.displayCurrency)}</div>
           </div>
 
           <div className="rounded-2xl bg-[linear-gradient(135deg,#1a7a4f_0%,#24a56d_100%)] p-4 text-white shadow-lg">
             <div className="text-xs uppercase tracking-[0.12em] text-white/80">Due next 30 days</div>
             <div className="mt-2 text-2xl font-bold">{analytics.next30Count}</div>
-            <div className="text-sm text-white/85">{formatAmount(analytics.next30AmountMinor, "USD")}</div>
+            <div className="text-sm text-white/85">{formatAmount(analytics.next30AmountMinor, analytics.displayCurrency)}</div>
           </div>
 
           <div className="rounded-2xl bg-[linear-gradient(135deg,#8a3f16_0%,#c06024_100%)] p-4 text-white shadow-lg">
             <div className="text-xs uppercase tracking-[0.12em] text-white/80">Due this year</div>
             <div className="mt-2 text-2xl font-bold">{analytics.yearCount}</div>
-            <div className="text-sm text-white/85">{formatAmount(analytics.yearAmountMinor, "USD")}</div>
+            <div className="text-sm text-white/85">{formatAmount(analytics.yearAmountMinor, analytics.displayCurrency)}</div>
           </div>
         </div>
       </div>
@@ -109,7 +109,7 @@ export default async function AnalyticsPage({
                     </span>
                     <span className="text-sm text-[var(--muted)]">{item.count} payments</span>
                   </div>
-                  <div className="font-bold text-[var(--ink)]">{formatAmount(item.amountMinor, "USD")}</div>
+                  <div className="font-bold text-[var(--ink)]">{formatAmount(item.amountMinor, analytics.displayCurrency)}</div>
                 </div>
               </li>
             ))}
@@ -130,7 +130,7 @@ export default async function AnalyticsPage({
                 <div className="flex items-center justify-between">
                   <div className="text-sm font-semibold text-[var(--ink)]">{item.categoryName}</div>
                   <div className="text-right">
-                    <div className="font-bold text-[var(--ink)]">{formatAmount(item.amountMinor, "USD")}</div>
+                    <div className="font-bold text-[var(--ink)]">{formatAmount(item.amountMinor, analytics.displayCurrency)}</div>
                     <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--muted)]">{item.count} items</div>
                   </div>
                 </div>
