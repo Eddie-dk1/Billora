@@ -134,7 +134,15 @@ export async function updatePaymentAction(formData: FormData): Promise<void> {
 }
 
 export async function markPaymentPaidAction(formData: FormData): Promise<void> {
-  const parsed = markPaidSchema.safeParse(formDataToObject(formData));
+  const parsed = markPaidSchema.safeParse({
+    context: String(formData.get("context") ?? ""),
+    paymentId: String(formData.get("paymentId") ?? ""),
+    paidAt: String(formData.get("paidAt") ?? ""),
+    paidAmount: optionalString(formData.get("paidAmount")),
+    currency: optionalString(formData.get("currency"))?.toUpperCase(),
+    note: optionalString(formData.get("note")),
+    earlyDecision: optionalString(formData.get("earlyDecision")),
+  });
   if (!parsed.success) {
     throw new Error(parsed.error.issues[0]?.message ?? "invalid form");
   }
@@ -187,4 +195,9 @@ export async function stopPaymentAction(formData: FormData): Promise<void> {
 function formDataToObject(formData: FormData): Record<string, string> {
   const entries = Array.from(formData.entries()).map(([key, value]) => [key, String(value)]);
   return Object.fromEntries(entries);
+}
+
+function optionalString(value: FormDataEntryValue | null): string | undefined {
+  const normalized = String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : undefined;
 }

@@ -27,6 +27,7 @@ model User {
   accounts               Account[]
   sessions               Session[]
   sharedMemberships      SharedAccountMember[]
+  pushSubscriptions      PushSubscription[]
 }
 
 model SharedAccount {
@@ -131,6 +132,25 @@ model NotificationLog {
   @@index([userId, paymentId, targetDueDate, reminderOffsetDays])
 }
 
+model PushSubscription {
+  id             String   @id @default(cuid())
+  userId         String
+  endpoint       String   @unique
+  p256dh         String
+  auth           String
+  expirationTime DateTime?
+  isActive       Boolean  @default(true)
+  userAgent      String?
+  lastUsedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, endpoint])
+  @@index([userId, isActive])
+}
+
 // Auth.js models
 model Account {
   userId             String
@@ -184,6 +204,5 @@ model Category {
   @@unique([ownerType, ownerId, name])
   @@index([ownerType, ownerId, isArchived])
 }
-
 
 

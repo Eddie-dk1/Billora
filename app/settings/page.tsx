@@ -1,5 +1,6 @@
 import { InviteShare } from "@/components/invite-share";
 import { ContextSwitcherShell } from "@/components/context-switcher-shell";
+import { PushSubscriptionManager } from "@/components/push-subscription-manager";
 import { formatDate } from "@/lib/presenters";
 import { requireOnboardedUserId } from "@/server/auth";
 import { resolveAccessScopeForUser, resolveContextFromSearchParams, type SearchParamsLike } from "@/server/context";
@@ -135,6 +136,8 @@ export default async function SettingsPage({
               className="h-4 w-4"
             />
           </label>
+
+          <PushSubscriptionManager />
 
           <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-3 text-xs text-[var(--muted)]">
             Shared editing mode: last write wins. FX analytics use current rates (as-of-now).

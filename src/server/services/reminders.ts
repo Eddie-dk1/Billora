@@ -1,5 +1,12 @@
 import { prisma } from "@/lib/prisma";
 import { resolveAccessScopeForUser, type AppContextType } from "@/server/context";
+import {
+  deactivatePushSubscriptionByEndpoint,
+  listActivePushSubscriptionsForUser,
+  markPushSubscriptionUsed,
+  type StoredPushSubscription,
+} from "@/server/services/push-subscriptions";
+import webPush from "web-push";
 
 type ReminderRunResult = {
   runAt: string;
@@ -36,10 +43,16 @@ const FALLBACK_TIMEZONE = "UTC";
 type ReminderChannel = "in_app" | "push";
 type ReminderStatus = "pending" | "sent" | "read" | "skipped" | "failed";
 
-type PushAttemptResult = "sent" | "failed";
+type PushAttemptResult =
+  | "sent"
+  | "failed"
+  | "skipped_no_subscription"
+  | "skipped_push_not_configured";
 
 const MAX_PUSH_ATTEMPTS = 3;
 const PUSH_RETRY_BACKOFF_MINUTES = [0, 5, 30];
+const PUSH_CONFIG_ERROR = "push_not_configured";
+const PUSH_NO_SUBSCRIPTION_ERROR = "no_active_push_subscription";
 
 export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunResult> {
   const users = (await prisma.user.findMany({
@@ -128,6 +141,9 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
     select: {
       id: true,
       userId: true,
+      paymentId: true,
+      targetDueDate: true,
+      reminderOffsetDays: true,
       attemptCount: true,
       lastAttemptAt: true,
       status: true,
@@ -135,6 +151,7 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
   });
 
   const usersById = new Map(users.map((user) => [user.id, user]));
+  const subscriptionCache = new Map<string, StoredPushSubscription[]>();
 
   for (const log of pushLogs) {
     const user = usersById.get(log.userId);
@@ -143,6 +160,19 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
     }
 
     if (!shouldAttemptPushRetry(runAt, log.attemptCount, log.lastAttemptAt)) {
+      continue;
+    }
+
+    if (!user.notificationsEnabled) {
+      await prisma.notificationLog.update({
+        where: { id: log.id },
+        data: {
+          status: "skipped",
+          errorMessage: "notifications_disabled",
+          lastAttemptAt: runAt,
+        },
+      });
+      pushSkipped += 1;
       continue;
     }
 
@@ -159,11 +189,23 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
       continue;
     }
 
-    pushAttempted += 1;
+    let subscriptions = subscriptionCache.get(log.userId);
+    if (!subscriptions) {
+      subscriptions = await listActivePushSubscriptionsForUser(log.userId);
+      subscriptionCache.set(log.userId, subscriptions);
+    }
+
     const nextAttemptCount = log.attemptCount + 1;
-    const delivery = await attemptPushDelivery();
+    const delivery = await attemptPushDelivery({
+      subscriptions,
+      paymentId: log.paymentId,
+      targetDueDate: log.targetDueDate,
+      reminderOffsetDays: log.reminderOffsetDays,
+      runAt,
+    });
 
     if (delivery === "sent") {
+      pushAttempted += 1;
       await prisma.notificationLog.update({
         where: { id: log.id },
         data: {
@@ -178,6 +220,33 @@ export async function runRemindersJob(runAt = new Date()): Promise<ReminderRunRe
       continue;
     }
 
+    if (delivery === "skipped_push_not_configured") {
+      await prisma.notificationLog.update({
+        where: { id: log.id },
+        data: {
+          status: "skipped",
+          lastAttemptAt: runAt,
+          errorMessage: PUSH_CONFIG_ERROR,
+        },
+      });
+      pushSkipped += 1;
+      continue;
+    }
+
+    if (delivery === "skipped_no_subscription") {
+      await prisma.notificationLog.update({
+        where: { id: log.id },
+        data: {
+          status: "skipped",
+          lastAttemptAt: runAt,
+          errorMessage: PUSH_NO_SUBSCRIPTION_ERROR,
+        },
+      });
+      pushSkipped += 1;
+      continue;
+    }
+
+    pushAttempted += 1;
     const terminal = nextAttemptCount >= MAX_PUSH_ATTEMPTS;
     await prisma.notificationLog.update({
       where: { id: log.id },
@@ -514,8 +583,93 @@ async function createNotificationLogIfMissing(input: {
   return true;
 }
 
-async function attemptPushDelivery(): Promise<PushAttemptResult> {
+async function attemptPushDelivery(input: {
+  subscriptions: StoredPushSubscription[];
+  paymentId: string;
+  targetDueDate: Date;
+  reminderOffsetDays: number;
+  runAt: Date;
+}): Promise<PushAttemptResult> {
+  const pushConfig = loadPushConfig();
+  if (!pushConfig) {
+    return "skipped_push_not_configured";
+  }
+
+  if (input.subscriptions.length === 0) {
+    return "skipped_no_subscription";
+  }
+
+  webPush.setVapidDetails(pushConfig.subject, pushConfig.publicKey, pushConfig.privateKey);
+
+  const payment = await prisma.payment.findUnique({
+    where: { id: input.paymentId },
+    select: { title: true },
+  });
+
+  const payload = JSON.stringify({
+    title: payment?.title ?? "Payment reminder",
+    body: `${Math.max(0, input.reminderOffsetDays)}d reminder for ${input.targetDueDate.toISOString().slice(0, 10)}`,
+    url: "/reminders",
+    dueDate: input.targetDueDate.toISOString(),
+    reminderOffsetDays: input.reminderOffsetDays,
+  });
+
+  let sent = 0;
+  let transientFailure = false;
+
+  for (const subscription of input.subscriptions) {
+    try {
+      await webPush.sendNotification(
+        {
+          endpoint: subscription.endpoint,
+          expirationTime: subscription.expirationTime,
+          keys: {
+            p256dh: subscription.p256dh,
+            auth: subscription.auth,
+          },
+        },
+        payload,
+      );
+
+      await markPushSubscriptionUsed(subscription.id, input.runAt);
+      sent += 1;
+    } catch (error) {
+      const statusCode = typeof error === "object" && error !== null && "statusCode" in error
+        ? Number((error as { statusCode?: unknown }).statusCode)
+        : null;
+
+      if (statusCode === 404 || statusCode === 410) {
+        await deactivatePushSubscriptionByEndpoint(subscription.endpoint);
+        continue;
+      }
+
+      transientFailure = true;
+    }
+  }
+
+  if (sent > 0) {
+    return "sent";
+  }
+
+  if (!transientFailure) {
+    return "skipped_no_subscription";
+  }
+
   return "failed";
+}
+
+function loadPushConfig():
+  | { publicKey: string; privateKey: string; subject: string }
+  | null {
+  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY?.trim() ?? "";
+  const privateKey = process.env.VAPID_PRIVATE_KEY?.trim() ?? "";
+  const subject = process.env.VAPID_SUBJECT?.trim() ?? "";
+
+  if (!publicKey || !privateKey || !subject) {
+    return null;
+  }
+
+  return { publicKey, privateKey, subject };
 }
 
 export function shouldAttemptPushRetry(
